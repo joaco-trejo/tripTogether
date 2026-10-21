@@ -5,7 +5,7 @@
 //  - Todos los del viaje ven las mismas fotos.
 // =================================================================
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Camera, X } from "lucide-react";
+import { Camera, X, SwitchCamera } from "lucide-react";
 import { COLORS } from "../constants";
 import { supabase } from "../supabaseClient";
 import { friendlyError } from "../helpers";
@@ -24,6 +24,9 @@ export default function PhotosTab({ session, active }) {
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [photos, setPhotos] = useState([]);
+  const [facing, setFacing] = useState("environment"); // "environment" = trasera, "user" = frontal
+  const [canFlip, setCanFlip] = useState(false); // ¿hay más de una cámara?
+  const [flipping, setFlipping] = useState(false);
 
   // ---- Cargar fotos del viaje + actualizarse en vivo ----
   const loadPhotos = useCallback(async () => {
@@ -51,16 +54,30 @@ export default function PhotosTab({ session, active }) {
   }, [tripId, memberId, loadPhotos]);
 
   // ---- Cámara ----
+  // Se pide con "ideal" (y no "exact") para que, si el dispositivo no tiene esa cámara
+  // (por ejemplo una notebook), abra la que haya en vez de dar error.
+  const openStream = (mode) =>
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: mode } } });
+
+  // El botón de girar solo tiene sentido si el dispositivo tiene más de una cámara
+  const detectCameras = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setCanFlip(devices.filter((d) => d.kind === "videoinput").length > 1);
+    } catch {
+      setCanFlip(true);
+    }
+  };
+
   const startCamera = async () => {
     setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-      });
+      const stream = await openStream(facing);
       // Solo guardamos el stream. El <video> todavía no existe en pantalla:
       // se dibuja cuando camOn pasa a true, y ahí lo conecta el useEffect de abajo.
       streamRef.current = stream;
       setCamOn(true);
+      detectCameras();
     } catch (err) {
       setError("No se pudo acceder a la cámara: " + err.message);
     }
@@ -70,6 +87,39 @@ export default function PhotosTab({ session, active }) {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setCamOn(false);
+  };
+
+  // Girar entre cámara trasera y frontal
+  const flipCamera = async () => {
+    const next = facing === "environment" ? "user" : "environment";
+    setError(null);
+    setFlipping(true);
+
+    const attach = (stream) => {
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch(() => {});
+      }
+    };
+
+    // En muchos celulares no se pueden abrir dos cámaras a la vez: primero se apaga la actual
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    try {
+      attach(await openStream(next));
+      setFacing(next);
+    } catch (err) {
+      // Si falla, intentamos volver a la cámara que estaba andando
+      try {
+        attach(await openStream(facing));
+        setError("No se pudo cambiar de cámara: " + err.message);
+      } catch {
+        stopCamera();
+        setError("No se pudo cambiar de cámara: " + err.message);
+      }
+    } finally {
+      setFlipping(false);
+    }
   };
 
   useEffect(() => {
@@ -173,7 +223,15 @@ export default function PhotosTab({ session, active }) {
       ) : (
         <div style={{ marginBottom: "14px" }}>
           <div style={{ position: "relative", borderRadius: "12px", overflow: "hidden", background: "#000" }}>
-            <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", display: "block" }} />
+            {/* La cámara frontal se ve como espejo (como en cualquier app de selfies).
+                La foto que se guarda sale sin espejar. */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              style={{ width: "100%", display: "block", transform: facing === "user" ? "scaleX(-1)" : "none" }}
+            />
           </div>
           <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
             <button
@@ -187,6 +245,21 @@ export default function PhotosTab({ session, active }) {
             >
               {uploading ? "Subiendo…" : "Sacar foto"}
             </button>
+            {canFlip && (
+              <button
+                onClick={flipCamera}
+                disabled={flipping || uploading}
+                aria-label="Girar cámara"
+                title="Girar cámara"
+                style={{
+                  padding: "12px 14px", borderRadius: "10px", border: `1px solid ${COLORS.line}`,
+                  background: "white", display: "flex", alignItems: "center",
+                  cursor: flipping ? "default" : "pointer", opacity: flipping ? 0.6 : 1,
+                }}
+              >
+                <SwitchCamera size={18} />
+              </button>
+            )}
             <button
               onClick={stopCamera}
               style={{ padding: "12px 16px", borderRadius: "10px", border: `1px solid ${COLORS.line}`, background: "white", cursor: "pointer" }}
